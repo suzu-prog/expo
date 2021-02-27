@@ -1,6 +1,6 @@
 //  Copyright © 2019 650 Industries. All rights reserved.
 
-#import <EXUpdates/EXUpdatesDatabase.h>
+#import <EXUpdates/EXUpdatesDatabase+Tests.h>
 
 #import <sqlite3.h>
 
@@ -14,7 +14,8 @@ NS_ASSUME_NONNULL_BEGIN
 @end
 
 static NSString * const EXUpdatesDatabaseErrorDomain = @"EXUpdatesDatabase";
-static NSString * const EXUpdatesDatabaseFilename = @"expo-v4.db";
+static NSString * const EXUpdatesDatabaseV4Filename = @"expo-v4.db";
+static NSString * const EXUpdatesDatabaseLatestFilename = @"expo-v5.db";
 
 static NSString * const EXUpdatesDatabaseManifestFiltersKey = @"manifestFilters";
 static NSString * const EXUpdatesDatabaseServerDefinedHeadersKey = @"serverDefinedHeaders";
@@ -34,22 +35,32 @@ static NSString * const EXUpdatesDatabaseServerDefinedHeadersKey = @"serverDefin
 - (BOOL)openDatabaseInDirectory:(NSURL *)directory withError:(NSError ** _Nullable)error
 {
   sqlite3 *db;
-  NSURL *dbUrl = [directory URLByAppendingPathComponent:EXUpdatesDatabaseFilename];
+  NSURL *dbUrl = [directory URLByAppendingPathComponent:EXUpdatesDatabaseLatestFilename];
   BOOL shouldInitializeDatabase = ![[NSFileManager defaultManager] fileExistsAtPath:[dbUrl path]];
+
+  BOOL didMigrate = [self _migrateDatabaseInDirectory:directory];
+  if (!didMigrate) {
+    // ignore error here, we'll handle it later anyway
+    [NSFileManager.defaultManager removeItemAtPath:dbUrl.path error:nil];
+    shouldInitializeDatabase = YES;
+  } else {
+    shouldInitializeDatabase = NO;
+  }
+
   int resultCode = sqlite3_open([[dbUrl path] UTF8String], &db);
   if (resultCode != SQLITE_OK) {
-    NSLog(@"Error opening SQLite db: %@", [self _errorFromSqlite:_db].localizedDescription);
+    NSLog(@"Error opening SQLite db: %@", [self _errorFromSqlite:db].localizedDescription);
     sqlite3_close(db);
 
     if (resultCode == SQLITE_CORRUPT || resultCode == SQLITE_NOTADB) {
-      NSString *archivedDbFilename = [NSString stringWithFormat:@"%f-%@", [[NSDate date] timeIntervalSince1970], EXUpdatesDatabaseFilename];
+      NSString *archivedDbFilename = [NSString stringWithFormat:@"%f-%@", [[NSDate date] timeIntervalSince1970], EXUpdatesDatabaseLatestFilename];
       NSURL *destinationUrl = [directory URLByAppendingPathComponent:archivedDbFilename];
       NSError *err;
       if ([[NSFileManager defaultManager] moveItemAtURL:dbUrl toURL:destinationUrl error:&err]) {
         NSLog(@"Moved corrupt SQLite db to %@", archivedDbFilename);
         if (sqlite3_open([[dbUrl absoluteString] UTF8String], &db) != SQLITE_OK) {
           if (error != nil) {
-            *error = [self _errorFromSqlite:_db];
+            *error = [self _errorFromSqlite:db];
           }
           return NO;
         }
@@ -65,12 +76,18 @@ static NSString * const EXUpdatesDatabaseServerDefinedHeadersKey = @"serverDefin
       }
     } else {
       if (error != nil) {
-        *error = [self _errorFromSqlite:_db];
+        *error = [self _errorFromSqlite:db];
       }
       return NO;
     }
   }
   _db = db;
+
+  // foreign keys must be turned on explicitly for each database connection
+  NSError *pragmaForeignKeysError;
+  if (![self _executeSql:@"PRAGMA foreign_keys=ON;" withArgs:nil error:&pragmaForeignKeysError]) {
+    NSLog(@"Error turning on foreign key constraint: %@", pragmaForeignKeysError.localizedDescription);
+  }
 
   if (shouldInitializeDatabase) {
     return [self _initializeDatabase:error];
@@ -95,7 +112,6 @@ static NSString * const EXUpdatesDatabaseServerDefinedHeadersKey = @"serverDefin
   dispatch_assert_queue(_databaseQueue);
 
   NSString * const createTableStmts = @"\
-   PRAGMA foreign_keys = ON;\
    CREATE TABLE \"updates\" (\
    \"id\"  BLOB UNIQUE,\
    \"scope_key\"  TEXT NOT NULL,\
@@ -111,7 +127,7 @@ static NSString * const EXUpdatesDatabaseServerDefinedHeadersKey = @"serverDefin
    CREATE TABLE \"assets\" (\
    \"id\"  INTEGER PRIMARY KEY AUTOINCREMENT,\
    \"url\"  TEXT,\
-   \"key\"  TEXT NOT NULL UNIQUE,\
+   \"key\"  TEXT UNIQUE,\
    \"headers\"  TEXT,\
    \"type\"  TEXT NOT NULL,\
    \"metadata\"  TEXT,\
@@ -147,6 +163,71 @@ static NSString * const EXUpdatesDatabaseServerDefinedHeadersKey = @"serverDefin
     sqlite3_free(errMsg);
     return NO;
   };
+  return YES;
+}
+
+- (BOOL)_migrateDatabaseInDirectory:(NSURL *)directory
+{
+  dispatch_assert_queue(_databaseQueue);
+  NSURL *latestURL = [directory URLByAppendingPathComponent:EXUpdatesDatabaseLatestFilename];
+  NSURL *v4URL = [directory URLByAppendingPathComponent:EXUpdatesDatabaseV4Filename];
+  if ([NSFileManager.defaultManager fileExistsAtPath:latestURL.path]) {
+    return NO;
+  }
+  if ([NSFileManager.defaultManager fileExistsAtPath:v4URL.path]) {
+    NSError *fileMoveError;
+    if (![NSFileManager.defaultManager moveItemAtPath:v4URL.path toPath:latestURL.path error:&fileMoveError]) {
+      NSLog(@"Migration failed: failed to rename database file");
+      return NO;
+    }
+    sqlite3 *db;
+    if (sqlite3_open(latestURL.absoluteString.UTF8String, &db) != SQLITE_OK) {
+      NSLog(@"Error opening migrated SQLite db: %@", [self _errorFromSqlite:db].localizedDescription);
+      sqlite3_close(db);
+      return NO;
+    }
+
+    NSError *migrationError;
+    if (![self _migrate4To5:db error:&migrationError]) {
+      NSLog(@"Error migrating SQLite db from v4 to v5: %@", [self _errorFromSqlite:db].localizedDescription);
+      sqlite3_close(db);
+      return NO;
+    }
+
+    // migration was successful
+    return YES;
+  }
+}
+
+- (BOOL)_migrate4To5:(sqlite3 *)db error:(NSError **)error
+{
+  // https://www.sqlite.org/lang_altertable.html#otheralter
+  if (sqlite3_exec(db, "PRAGMA foreign_keys=OFF;", NULL, NULL, NULL) != SQLITE_OK) return NO;
+  if (sqlite3_exec(db, "BEGIN;", NULL, NULL, NULL) != SQLITE_OK) return NO;
+
+  NSString * const migrationSQL = @"CREATE TABLE \"assets\" (\
+    \"id\"  INTEGER PRIMARY KEY AUTOINCREMENT,\
+    \"url\"  TEXT,\
+    \"key\"  TEXT UNIQUE,\
+    \"headers\"  TEXT,\
+    \"type\"  TEXT NOT NULL,\
+    \"metadata\"  TEXT,\
+    \"download_time\"  INTEGER NOT NULL,\
+    \"relative_path\"  TEXT NOT NULL,\
+    \"hash\"  BLOB NOT NULL,\
+    \"hash_type\"  INTEGER NOT NULL,\
+    \"marked_for_deletion\"  INTEGER NOT NULL\
+    );\
+  INSERT INTO `new_assets` (`id`, `url`, `key`, `headers`, `type`, `metadata`, `download_time`, `relative_path`, `hash`, `hash_type`, `marked_for_deletion`)\
+    SELECT `id`, `url`, `key`, `headers`, `type`, `metadata`, `download_time`, `relative_path`, `hash`, `hash_type`, `marked_for_deletion` FROM `assets`;\
+  DROP TABLE `assets`;\
+  ALTER TABLE `new_assets` RENAME TO `assets`;";
+  if (sqlite3_exec(db, migrationSQL.UTF8String, NULL, NULL, NULL) != SQLITE_OK) {
+    sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
+    return NO;
+  }
+
+  if (sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL) != SQLITE_OK) return NO;
   return YES;
 }
 

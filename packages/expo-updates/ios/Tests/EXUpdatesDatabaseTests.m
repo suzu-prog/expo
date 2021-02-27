@@ -3,8 +3,52 @@
 #import <XCTest/XCTest.h>
 
 #import <EXUpdates/EXUpdatesConfig.h>
-#import <EXUpdates/EXUpdatesDatabase.h>
+#import <EXUpdates/EXUpdatesDatabase+Tests.h>
 #import <EXUpdates/EXUpdatesNewUpdate.h>
+
+static NSString * const EXUpdatesDatabaseV4Schema = @"\
+CREATE TABLE \"updates\" (\
+\"id\"  BLOB UNIQUE,\
+\"scope_key\"  TEXT NOT NULL,\
+\"commit_time\"  INTEGER NOT NULL,\
+\"runtime_version\"  TEXT NOT NULL,\
+\"launch_asset_id\" INTEGER,\
+\"metadata\"  TEXT,\
+\"status\"  INTEGER NOT NULL,\
+\"keep\"  INTEGER NOT NULL,\
+PRIMARY KEY(\"id\"),\
+FOREIGN KEY(\"launch_asset_id\") REFERENCES \"assets\"(\"id\") ON DELETE CASCADE\
+);\
+CREATE TABLE \"assets\" (\
+\"id\"  INTEGER PRIMARY KEY AUTOINCREMENT,\
+\"url\"  TEXT,\
+\"key\"  TEXT NOT NULL UNIQUE,\
+\"headers\"  TEXT,\
+\"type\"  TEXT NOT NULL,\
+\"metadata\"  TEXT,\
+\"download_time\"  INTEGER NOT NULL,\
+\"relative_path\"  TEXT NOT NULL,\
+\"hash\"  BLOB NOT NULL,\
+\"hash_type\"  INTEGER NOT NULL,\
+\"marked_for_deletion\"  INTEGER NOT NULL\
+);\
+CREATE TABLE \"updates_assets\" (\
+\"update_id\"  BLOB NOT NULL,\
+\"asset_id\" INTEGER NOT NULL,\
+FOREIGN KEY(\"update_id\") REFERENCES \"updates\"(\"id\") ON DELETE CASCADE,\
+FOREIGN KEY(\"asset_id\") REFERENCES \"assets\"(\"id\") ON DELETE CASCADE\
+);\
+CREATE TABLE \"json_data\" (\
+\"id\" INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,\
+\"key\" TEXT NOT NULL,\
+\"value\" TEXT NOT NULL,\
+\"last_updated\" INTEGER NOT NULL,\
+\"scope_key\" TEXT NOT NULL\
+);\
+CREATE UNIQUE INDEX \"index_updates_scope_key_commit_time\" ON \"updates\" (\"scope_key\", \"commit_time\");\
+CREATE INDEX \"index_updates_launch_asset_id\" ON \"updates\" (\"launch_asset_id\");\
+CREATE INDEX \"index_json_data_scope_key\" ON \"json_data\" (\"scope_key\")\
+";
 
 @interface EXUpdatesDatabaseTests : XCTestCase
 
@@ -54,6 +98,25 @@
   NSError *error;
   [NSFileManager.defaultManager removeItemAtPath:_testDatabaseDir.path error:&error];
   XCTAssertNil(error);
+}
+
+- (void)testForeignKeys
+{
+  __block NSError *expectedError;
+  EXUpdatesUpdate *update = [EXUpdatesNewUpdate updateWithNewManifest:_manifest response:nil config:_config database:_db];
+  dispatch_sync(_db.databaseQueue, ^{
+    NSError *updatesError;
+    [_db addUpdate:update error:&updatesError];
+    if (updatesError) {
+      return;
+    }
+
+    NSError *updatesAssetsError;
+    [_db _executeSql:@"INSERT OR REPLACE INTO updates_assets (\"update_id\", \"asset_id\") VALUES (?1, ?2)" withArgs:@[update.updateId, @(47)] error:&updatesAssetsError];
+    expectedError = updatesAssetsError;
+  });
+  XCTAssertNotNil(expectedError);
+  XCTAssertEqual(787, expectedError.code); // SQLITE_CONSTRAINT_FOREIGNKEY
 }
 
 - (void)testSetMetadata_OverwriteAllFields

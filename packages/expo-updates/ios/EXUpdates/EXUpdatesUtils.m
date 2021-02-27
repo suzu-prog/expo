@@ -59,6 +59,7 @@ static NSString * const EXUpdatesUtilsErrorDomain = @"EXUpdatesUtils";
     }
   }
 
+  NSLog(@"erictest: %@", updatesDirectory.absoluteString);
   return updatesDirectory;
 }
 
