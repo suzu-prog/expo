@@ -38,10 +38,9 @@ async function thisAction({
     let errors: any[] = [];
     for (const pkg of packages) {
       if (
-        pkg.podspecName !== 'EXSharing' &&
-        (!pkg.isSupportedOnPlatform('ios') ||
-          !(await pkg.hasNativeTestsAsync('ios')) ||
-          !pkg.podspecName)
+        !pkg.isSupportedOnPlatform('ios') ||
+        !(await pkg.hasNativeTestsAsync('ios')) ||
+        !pkg.podspecName
       ) {
         continue;
       }
@@ -58,7 +57,7 @@ async function thisAction({
         await fs.mkdirp(destinationDir);
 
         // find user directory name, should be runner.xcuserdatad but depends on the OS username
-        const xcuserdataDirName = await fs.readdir(path.join(xcodeprojDir, 'xcuserdata'))[0];
+        const xcuserdataDirName = (await fs.readdir(path.join(xcodeprojDir, 'xcuserdata')))[0];
 
         const xcschemesDir = path.join(xcodeprojDir, 'xcuserdata', xcuserdataDirName, 'xcschemes');
         const xcschemesFiles = (await fs.readdir(xcschemesDir)).filter((file) =>
@@ -82,6 +81,7 @@ async function thisAction({
     if (errors.length) {
       console.error('One or more iOS unit tests failed:');
       for (const error of errors) {
+        console.error(error.message);
         console.error('stdout >', error.stdout);
         console.error('stderr >', error.stderr);
       }
