@@ -40,8 +40,16 @@ static NSString * const EXUpdatesDatabaseServerDefinedHeadersKey = @"serverDefin
 
   BOOL didMigrate = [self _migrateDatabaseInDirectory:directory];
   if (!didMigrate) {
-    // ignore error here, we'll handle it later anyway
-    [NSFileManager.defaultManager removeItemAtPath:dbUrl.path error:nil];
+    NSError *removeFailedMigrationError;
+    if (![NSFileManager.defaultManager removeItemAtPath:dbUrl.path error:&removeFailedMigrationError]) {
+      if (error != nil) {
+        NSString *description = [NSString stringWithFormat:@"Failed to migrate database, then failed to remove old database file: %@", removeFailedMigrationError.localizedDescription];
+        *error = [NSError errorWithDomain:EXUpdatesDatabaseErrorDomain
+                                     code:1022
+                                 userInfo:@{ NSLocalizedDescriptionKey: description, NSUnderlyingErrorKey: removeFailedMigrationError }];
+      }
+      return NO;
+    }
     shouldInitializeDatabase = YES;
   } else {
     shouldInitializeDatabase = NO;
@@ -195,6 +203,7 @@ static NSString * const EXUpdatesDatabaseServerDefinedHeadersKey = @"serverDefin
     }
 
     // migration was successful
+    sqlite3_close(db);
     return YES;
   }
 }
