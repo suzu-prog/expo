@@ -1,6 +1,8 @@
 //  Copyright © 2019 650 Industries. All rights reserved.
 
 #import <EXUpdates/EXUpdatesDatabase+Tests.h>
+#import <EXUpdates/EXUpdatesDatabaseInitialization.h>
+#import <EXUpdates/EXUpdatesDatabaseUtils.h>
 
 #import <sqlite3.h>
 
@@ -9,13 +11,8 @@ NS_ASSUME_NONNULL_BEGIN
 @interface EXUpdatesDatabase ()
 
 @property (nonatomic, assign) sqlite3 *db;
-@property (nonatomic, readwrite, strong) NSLock *lock;
 
 @end
-
-static NSString * const EXUpdatesDatabaseErrorDomain = @"EXUpdatesDatabase";
-static NSString * const EXUpdatesDatabaseV4Filename = @"expo-v4.db";
-static NSString * const EXUpdatesDatabaseLatestFilename = @"expo-v5.db";
 
 static NSString * const EXUpdatesDatabaseManifestFiltersKey = @"manifestFilters";
 static NSString * const EXUpdatesDatabaseServerDefinedHeadersKey = @"serverDefinedHeaders";
@@ -34,72 +31,13 @@ static NSString * const EXUpdatesDatabaseServerDefinedHeadersKey = @"serverDefin
 
 - (BOOL)openDatabaseInDirectory:(NSURL *)directory withError:(NSError ** _Nullable)error
 {
+  dispatch_assert_queue(_databaseQueue);
   sqlite3 *db;
-  NSURL *dbUrl = [directory URLByAppendingPathComponent:EXUpdatesDatabaseLatestFilename];
-  BOOL shouldInitializeDatabase = ![[NSFileManager defaultManager] fileExistsAtPath:[dbUrl path]];
-
-  BOOL didMigrate = [self _migrateDatabaseInDirectory:directory];
-  if (!didMigrate) {
-    NSError *removeFailedMigrationError;
-    if (![NSFileManager.defaultManager removeItemAtPath:dbUrl.path error:&removeFailedMigrationError]) {
-      if (error != nil) {
-        NSString *description = [NSString stringWithFormat:@"Failed to migrate database, then failed to remove old database file: %@", removeFailedMigrationError.localizedDescription];
-        *error = [NSError errorWithDomain:EXUpdatesDatabaseErrorDomain
-                                     code:1022
-                                 userInfo:@{ NSLocalizedDescriptionKey: description, NSUnderlyingErrorKey: removeFailedMigrationError }];
-      }
-      return NO;
-    }
-    shouldInitializeDatabase = YES;
-  } else {
-    shouldInitializeDatabase = NO;
+  if (![EXUpdatesDatabaseInitialization initializeDatabaseWithLatestSchemaInDirectory:directory database:&db error:error]) {
+    return NO;
   }
-
-  int resultCode = sqlite3_open([[dbUrl path] UTF8String], &db);
-  if (resultCode != SQLITE_OK) {
-    NSLog(@"Error opening SQLite db: %@", [self _errorFromSqlite:db].localizedDescription);
-    sqlite3_close(db);
-
-    if (resultCode == SQLITE_CORRUPT || resultCode == SQLITE_NOTADB) {
-      NSString *archivedDbFilename = [NSString stringWithFormat:@"%f-%@", [[NSDate date] timeIntervalSince1970], EXUpdatesDatabaseLatestFilename];
-      NSURL *destinationUrl = [directory URLByAppendingPathComponent:archivedDbFilename];
-      NSError *err;
-      if ([[NSFileManager defaultManager] moveItemAtURL:dbUrl toURL:destinationUrl error:&err]) {
-        NSLog(@"Moved corrupt SQLite db to %@", archivedDbFilename);
-        if (sqlite3_open([[dbUrl absoluteString] UTF8String], &db) != SQLITE_OK) {
-          if (error != nil) {
-            *error = [self _errorFromSqlite:db];
-          }
-          return NO;
-        }
-        shouldInitializeDatabase = YES;
-      } else {
-        NSString *description = [NSString stringWithFormat:@"Could not move existing corrupt database: %@", [err localizedDescription]];
-        if (error != nil) {
-          *error = [NSError errorWithDomain:EXUpdatesDatabaseErrorDomain
-                                       code:1004
-                                   userInfo:@{ NSLocalizedDescriptionKey: description, NSUnderlyingErrorKey: err }];
-        }
-        return NO;
-      }
-    } else {
-      if (error != nil) {
-        *error = [self _errorFromSqlite:db];
-      }
-      return NO;
-    }
-  }
+  NSAssert(db, @"Database appears to have initialized successfully, but there is no handle");
   _db = db;
-
-  // foreign keys must be turned on explicitly for each database connection
-  NSError *pragmaForeignKeysError;
-  if (![self _executeSql:@"PRAGMA foreign_keys=ON;" withArgs:nil error:&pragmaForeignKeysError]) {
-    NSLog(@"Error turning on foreign key constraint: %@", pragmaForeignKeysError.localizedDescription);
-  }
-
-  if (shouldInitializeDatabase) {
-    return [self _initializeDatabase:error];
-  }
   return YES;
 }
 
@@ -112,132 +50,6 @@ static NSString * const EXUpdatesDatabaseServerDefinedHeadersKey = @"serverDefin
 - (void)dealloc
 {
   [self closeDatabase];
-}
-
-- (BOOL)_initializeDatabase:(NSError **)error
-{
-  NSAssert(_db, @"Missing database handle");
-  dispatch_assert_queue(_databaseQueue);
-
-  NSString * const createTableStmts = @"\
-   CREATE TABLE \"updates\" (\
-   \"id\"  BLOB UNIQUE,\
-   \"scope_key\"  TEXT NOT NULL,\
-   \"commit_time\"  INTEGER NOT NULL,\
-   \"runtime_version\"  TEXT NOT NULL,\
-   \"launch_asset_id\" INTEGER,\
-   \"metadata\"  TEXT,\
-   \"status\"  INTEGER NOT NULL,\
-   \"keep\"  INTEGER NOT NULL,\
-   PRIMARY KEY(\"id\"),\
-   FOREIGN KEY(\"launch_asset_id\") REFERENCES \"assets\"(\"id\") ON DELETE CASCADE\
-   );\
-   CREATE TABLE \"assets\" (\
-   \"id\"  INTEGER PRIMARY KEY AUTOINCREMENT,\
-   \"url\"  TEXT,\
-   \"key\"  TEXT UNIQUE,\
-   \"headers\"  TEXT,\
-   \"type\"  TEXT NOT NULL,\
-   \"metadata\"  TEXT,\
-   \"download_time\"  INTEGER NOT NULL,\
-   \"relative_path\"  TEXT NOT NULL,\
-   \"hash\"  BLOB NOT NULL,\
-   \"hash_type\"  INTEGER NOT NULL,\
-   \"marked_for_deletion\"  INTEGER NOT NULL\
-   );\
-   CREATE TABLE \"updates_assets\" (\
-   \"update_id\"  BLOB NOT NULL,\
-   \"asset_id\" INTEGER NOT NULL,\
-   FOREIGN KEY(\"update_id\") REFERENCES \"updates\"(\"id\") ON DELETE CASCADE,\
-   FOREIGN KEY(\"asset_id\") REFERENCES \"assets\"(\"id\") ON DELETE CASCADE\
-   );\
-   CREATE TABLE \"json_data\" (\
-   \"id\" INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,\
-   \"key\" TEXT NOT NULL,\
-   \"value\" TEXT NOT NULL,\
-   \"last_updated\" INTEGER NOT NULL,\
-   \"scope_key\" TEXT NOT NULL\
-   );\
-   CREATE UNIQUE INDEX \"index_updates_scope_key_commit_time\" ON \"updates\" (\"scope_key\", \"commit_time\");\
-   CREATE INDEX \"index_updates_launch_asset_id\" ON \"updates\" (\"launch_asset_id\");\
-   CREATE INDEX \"index_json_data_scope_key\" ON \"json_data\" (\"scope_key\")\
-   ";
-
-  char *errMsg;
-  if (sqlite3_exec(_db, [createTableStmts UTF8String], NULL, NULL, &errMsg) != SQLITE_OK) {
-    if (error != nil) {
-      *error = [self _errorFromSqlite:_db];
-    }
-    sqlite3_free(errMsg);
-    return NO;
-  };
-  return YES;
-}
-
-- (BOOL)_migrateDatabaseInDirectory:(NSURL *)directory
-{
-  dispatch_assert_queue(_databaseQueue);
-  NSURL *latestURL = [directory URLByAppendingPathComponent:EXUpdatesDatabaseLatestFilename];
-  NSURL *v4URL = [directory URLByAppendingPathComponent:EXUpdatesDatabaseV4Filename];
-  if ([NSFileManager.defaultManager fileExistsAtPath:latestURL.path]) {
-    return NO;
-  }
-  if ([NSFileManager.defaultManager fileExistsAtPath:v4URL.path]) {
-    NSError *fileMoveError;
-    if (![NSFileManager.defaultManager moveItemAtPath:v4URL.path toPath:latestURL.path error:&fileMoveError]) {
-      NSLog(@"Migration failed: failed to rename database file");
-      return NO;
-    }
-    sqlite3 *db;
-    if (sqlite3_open(latestURL.absoluteString.UTF8String, &db) != SQLITE_OK) {
-      NSLog(@"Error opening migrated SQLite db: %@", [self _errorFromSqlite:db].localizedDescription);
-      sqlite3_close(db);
-      return NO;
-    }
-
-    NSError *migrationError;
-    if (![self _migrate4To5:db error:&migrationError]) {
-      NSLog(@"Error migrating SQLite db from v4 to v5: %@", [self _errorFromSqlite:db].localizedDescription);
-      sqlite3_close(db);
-      return NO;
-    }
-
-    // migration was successful
-    sqlite3_close(db);
-    return YES;
-  }
-}
-
-- (BOOL)_migrate4To5:(sqlite3 *)db error:(NSError **)error
-{
-  // https://www.sqlite.org/lang_altertable.html#otheralter
-  if (sqlite3_exec(db, "PRAGMA foreign_keys=OFF;", NULL, NULL, NULL) != SQLITE_OK) return NO;
-  if (sqlite3_exec(db, "BEGIN;", NULL, NULL, NULL) != SQLITE_OK) return NO;
-
-  NSString * const migrationSQL = @"CREATE TABLE \"assets\" (\
-    \"id\"  INTEGER PRIMARY KEY AUTOINCREMENT,\
-    \"url\"  TEXT,\
-    \"key\"  TEXT UNIQUE,\
-    \"headers\"  TEXT,\
-    \"type\"  TEXT NOT NULL,\
-    \"metadata\"  TEXT,\
-    \"download_time\"  INTEGER NOT NULL,\
-    \"relative_path\"  TEXT NOT NULL,\
-    \"hash\"  BLOB NOT NULL,\
-    \"hash_type\"  INTEGER NOT NULL,\
-    \"marked_for_deletion\"  INTEGER NOT NULL\
-    );\
-  INSERT INTO `new_assets` (`id`, `url`, `key`, `headers`, `type`, `metadata`, `download_time`, `relative_path`, `hash`, `hash_type`, `marked_for_deletion`)\
-    SELECT `id`, `url`, `key`, `headers`, `type`, `metadata`, `download_time`, `relative_path`, `hash`, `hash_type`, `marked_for_deletion` FROM `assets`;\
-  DROP TABLE `assets`;\
-  ALTER TABLE `new_assets` RENAME TO `assets`;";
-  if (sqlite3_exec(db, migrationSQL.UTF8String, NULL, NULL, NULL) != SQLITE_OK) {
-    sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
-    return NO;
-  }
-
-  if (sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL) != SQLITE_OK) return NO;
-  return YES;
 }
 
 # pragma mark - insert and update
@@ -639,138 +451,12 @@ static NSString * const EXUpdatesDatabaseServerDefinedHeadersKey = @"serverDefin
 {
   NSAssert(_db, @"Missing database handle");
   dispatch_assert_queue(_databaseQueue);
-  sqlite3_stmt *stmt;
-  if (sqlite3_prepare_v2(_db, [sql UTF8String], -1, &stmt, NULL) != SQLITE_OK) {
-    if (error != nil) {
-      *error = [self _errorFromSqlite:_db];
-    }
-    return nil;
-  }
-  if (args) {
-    if (![self _bindStatement:stmt withArgs:args]) {
-      if (error != nil) {
-        *error = [self _errorFromSqlite:_db];
-      }
-      return nil;
-    }
-  }
-
-  NSMutableArray *rows = [NSMutableArray arrayWithCapacity:0];
-  NSMutableArray *columnNames = [NSMutableArray arrayWithCapacity:0];
-
-  int columnCount = 0;
-  BOOL didFetchColumns = NO;
-  int result;
-  BOOL hasMore = YES;
-  BOOL didError = NO;
-  while (hasMore) {
-    result = sqlite3_step(stmt);
-    switch (result) {
-      case SQLITE_ROW: {
-        if (!didFetchColumns) {
-          // get all column names once at the beginning
-          columnCount = sqlite3_column_count(stmt);
-
-          for (int i = 0; i < columnCount; i++) {
-            [columnNames addObject:[NSString stringWithUTF8String:sqlite3_column_name(stmt, i)]];
-          }
-          didFetchColumns = YES;
-        }
-        NSMutableDictionary *entry = [NSMutableDictionary dictionary];
-        for (int i = 0; i < columnCount; i++) {
-          id columnValue = [self _getValueWithStatement:stmt column:i];
-          entry[columnNames[i]] = columnValue;
-        }
-        [rows addObject:entry];
-        break;
-      }
-      case SQLITE_DONE:
-        hasMore = NO;
-        break;
-      default:
-        didError = YES;
-        hasMore = NO;
-        break;
-    }
-  }
-
-  if (didError && error != nil) {
-    *error = [self _errorFromSqlite:_db];
-  }
-
-  sqlite3_finalize(stmt);
-
-  return didError ? nil : rows;
-}
-
-- (id)_getValueWithStatement:(sqlite3_stmt *)stmt column:(int)column
-{
-  int columnType = sqlite3_column_type(stmt, column);
-  switch (columnType) {
-    case SQLITE_INTEGER:
-      return @(sqlite3_column_int64(stmt, column));
-    case SQLITE_FLOAT:
-      return @(sqlite3_column_double(stmt, column));
-    case SQLITE_BLOB:
-      NSAssert(sqlite3_column_bytes(stmt, column) == 16, @"SQLite BLOB value should be a valid UUID");
-      return [[NSUUID alloc] initWithUUIDBytes:sqlite3_column_blob(stmt, column)];
-    case SQLITE_TEXT:
-      return [[NSString alloc] initWithBytes:(char *)sqlite3_column_text(stmt, column)
-                                      length:sqlite3_column_bytes(stmt, column)
-                                    encoding:NSUTF8StringEncoding];
-  }
-  return [NSNull null];
-}
-
-- (BOOL)_bindStatement:(sqlite3_stmt *)stmt withArgs:(NSArray *)args
-{
-  __block BOOL success = YES;
-  [args enumerateObjectsUsingBlock:^(id obj, NSUInteger idx, BOOL *stop) {
-    if ([obj isKindOfClass:[NSUUID class]]) {
-      uuid_t bytes;
-      [((NSUUID *)obj) getUUIDBytes:bytes];
-      if (sqlite3_bind_blob(stmt, (int)idx + 1, bytes, 16, SQLITE_TRANSIENT) != SQLITE_OK) {
-        success = NO;
-        *stop = YES;
-      }
-    } else if ([obj isKindOfClass:[NSNumber class]]) {
-      if (sqlite3_bind_int64(stmt, (int)idx + 1, [((NSNumber *)obj) longLongValue]) != SQLITE_OK) {
-        success = NO;
-        *stop = YES;
-      }
-    } else if ([obj isKindOfClass:[NSDictionary class]]) {
-      NSError *error;
-      NSData *jsonData = [NSJSONSerialization dataWithJSONObject:(NSDictionary *)obj options:kNilOptions error:&error];
-      if (!error && sqlite3_bind_text(stmt, (int)idx + 1, jsonData.bytes, (int)jsonData.length, SQLITE_TRANSIENT) != SQLITE_OK) {
-        success = NO;
-        *stop = YES;
-      }
-    } else if ([obj isKindOfClass:[NSNull class]]) {
-      if (sqlite3_bind_null(stmt, (int)idx + 1) != SQLITE_OK) {
-        success = NO;
-        *stop = YES;
-      }
-    } else {
-      // convert to string
-      NSString *string = [obj isKindOfClass:[NSString class]] ? (NSString *)obj : [obj description];
-      NSData *data = [string dataUsingEncoding:NSUTF8StringEncoding];
-      if (sqlite3_bind_text(stmt, (int)idx + 1, data.bytes, (int)data.length, SQLITE_TRANSIENT) != SQLITE_OK) {
-        success = NO;
-        *stop = YES;
-      }
-    }
-  }];
-  return success;
+  return [EXUpdatesDatabaseUtils executeSql:sql withArgs:args onDatabase:_db error:error];
 }
 
 - (NSError *)_errorFromSqlite:(struct sqlite3 *)db
 {
-  int code = sqlite3_errcode(db);
-  int extendedCode = sqlite3_extended_errcode(db);
-  NSString *message = [NSString stringWithUTF8String:sqlite3_errmsg(db)];
-  return [NSError errorWithDomain:EXUpdatesDatabaseErrorDomain
-                              code:extendedCode
-                          userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"Error code %i: %@ (extended error code %i)", code, message, extendedCode]}];
+  return [EXUpdatesDatabaseUtils errorFromSqlite:db];
 }
 
 - (EXUpdatesUpdate *)_updateWithRow:(NSDictionary *)row config:(EXUpdatesConfig *)config
