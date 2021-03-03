@@ -10,16 +10,6 @@ NS_ASSUME_NONNULL_BEGIN
                                              database:(struct sqlite3 **)database
                                                 error:(NSError ** _Nullable)error;
 
-/**
- * for testing purposes
- */
-+ (BOOL)initializeDatabaseWithSchema:(NSString *)schema
-                            filename:(NSString *)filename
-                         inDirectory:(NSURL *)directory
-                       shouldMigrate:(BOOL)shouldMigrate
-                            database:(struct sqlite3 **)database
-                               error:(NSError ** _Nullable)error;
-
 @end
 
 NS_ASSUME_NONNULL_END

@@ -2,7 +2,7 @@
 
 #import <XCTest/XCTest.h>
 
-#import <EXUpdates/EXUpdatesDatabaseInitialization.h>
+#import <EXUpdates/EXUpdatesDatabaseInitialization+Tests.h>
 #import <EXUpdates/EXUpdatesDatabaseUtils.h>
 
 #import <sqlite3.h>

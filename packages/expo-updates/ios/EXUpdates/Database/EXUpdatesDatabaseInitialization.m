@@ -1,12 +1,13 @@
 // Copyright 2021-present 650 Industries. All rights reserved.
 
-#import <EXUpdates/EXUpdatesDatabaseInitialization.h>
+#import <EXUpdates/EXUpdatesDatabaseInitialization+Tests.h>
+#import <EXUpdates/EXUpdatesDatabaseMigration.h>
+#import <EXUpdates/EXUpdatesDatabaseMigrationRegistry.h>
 #import <EXUpdates/EXUpdatesDatabaseUtils.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
 static NSString * const EXUpdatesDatabaseInitializationErrorDomain = @"EXUpdatesDatabaseInitialization";
-static NSString * const EXUpdatesDatabaseV4Filename = @"expo-v4.db";
 static NSString * const EXUpdatesDatabaseLatestFilename = @"expo-v5.db";
 
 static NSString * const EXUpdatesDatabaseInitializationLatestSchema = @"\
@@ -155,13 +156,26 @@ CREATE INDEX \"index_json_data_scope_key\" ON \"json_data\" (\"scope_key\")\
 + (BOOL)_migrateDatabaseInDirectory:(NSURL *)directory
 {
   NSURL *latestURL = [directory URLByAppendingPathComponent:EXUpdatesDatabaseLatestFilename];
-  NSURL *v4URL = [directory URLByAppendingPathComponent:EXUpdatesDatabaseV4Filename];
   if ([NSFileManager.defaultManager fileExistsAtPath:latestURL.path]) {
     return NO;
   }
-  if ([NSFileManager.defaultManager fileExistsAtPath:v4URL.path]) {
+
+  // find the newest database version that exists and try to migrate that file (ignore any older ones)
+  NSArray<id<EXUpdatesDatabaseMigration>> *migrations = [EXUpdatesDatabaseMigrationRegistry migrations];
+  __block NSURL *existingURL;
+  __block NSUInteger startingMigrationIndex;
+  [migrations enumerateObjectsWithOptions:NSEnumerationReverse usingBlock:^(id<EXUpdatesDatabaseMigration> migration, NSUInteger idx, BOOL *stop) {
+    NSURL *possibleURL = [directory URLByAppendingPathComponent:migration.filename];
+    if ([NSFileManager.defaultManager fileExistsAtPath:possibleURL.path]) {
+      existingURL = possibleURL;
+      startingMigrationIndex = idx;
+      *stop = YES;
+    }
+  }];
+
+  if (existingURL) {
     NSError *fileMoveError;
-    if (![NSFileManager.defaultManager moveItemAtPath:v4URL.path toPath:latestURL.path error:&fileMoveError]) {
+    if (![NSFileManager.defaultManager moveItemAtPath:existingURL.path toPath:latestURL.path error:&fileMoveError]) {
       NSLog(@"Migration failed: failed to rename database file");
       return NO;
     }
@@ -172,55 +186,21 @@ CREATE INDEX \"index_json_data_scope_key\" ON \"json_data\" (\"scope_key\")\
       return NO;
     }
 
-    NSError *migrationError;
-    if (![self _migrate4To5:db error:&migrationError]) {
-      NSLog(@"Error migrating SQLite db from v4 to v5: %@", [EXUpdatesDatabaseUtils errorFromSqlite:db].localizedDescription);
-      sqlite3_close(db);
-      return NO;
+    for (int i = startingMigrationIndex; i < migrations.count; i++) {
+      NSError *migrationError;
+      id<EXUpdatesDatabaseMigration> migration = migrations[i];
+      if (![migration runMigrationOnDatabase:db error:&migrationError]) {
+        NSLog(@"Error migrating SQLite db: %@", [EXUpdatesDatabaseUtils errorFromSqlite:db].localizedDescription);
+        sqlite3_close(db);
+        return NO;
+      }
     }
 
     // migration was successful
     sqlite3_close(db);
     return YES;
   }
-}
-
-+ (BOOL)_migrate4To5:(sqlite3 *)db error:(NSError **)error
-{
-  // https://www.sqlite.org/lang_altertable.html#otheralter
-  if (sqlite3_exec(db, "PRAGMA foreign_keys=OFF;", NULL, NULL, NULL) != SQLITE_OK) return NO;
-  if (sqlite3_exec(db, "BEGIN;", NULL, NULL, NULL) != SQLITE_OK) return NO;
-
-  if (![[self class] _safeExecOrRollback:db sql:@"CREATE TABLE \"new_assets\" (\
-        \"id\"  INTEGER PRIMARY KEY AUTOINCREMENT,\
-        \"url\"  TEXT,\
-        \"key\"  TEXT UNIQUE,\
-        \"headers\"  TEXT,\
-        \"type\"  TEXT NOT NULL,\
-        \"metadata\"  TEXT,\
-        \"download_time\"  INTEGER NOT NULL,\
-        \"relative_path\"  TEXT NOT NULL,\
-        \"hash\"  BLOB NOT NULL,\
-        \"hash_type\"  INTEGER NOT NULL,\
-        \"marked_for_deletion\"  INTEGER NOT NULL\
-        )"]) return NO;
-  if (![[self class] _safeExecOrRollback:db sql:@"INSERT INTO `new_assets` (`id`, `url`, `key`, `headers`, `type`, `metadata`, `download_time`, `relative_path`, `hash`, `hash_type`, `marked_for_deletion`)\
-        SELECT `id`, `url`, `key`, `headers`, `type`, `metadata`, `download_time`, `relative_path`, `hash`, `hash_type`, `marked_for_deletion` FROM `assets`"]) return NO;
-  if (![[self class] _safeExecOrRollback:db sql:@"DROP TABLE `assets`"]) return NO;
-  if (![[self class] _safeExecOrRollback:db sql:@"ALTER TABLE `new_assets` RENAME TO `assets`"]) return NO;
-
-  if (sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL) != SQLITE_OK) return NO;
-  if (sqlite3_exec(db, "PRAGMA foreign_keys=ON;", NULL, NULL, NULL) != SQLITE_OK) return NO;
-  return YES;
-}
-
-+ (BOOL)_safeExecOrRollback:(struct sqlite3 *)db sql:(NSString *)sql
-{
-  if (sqlite3_exec(db, sql.UTF8String, NULL, NULL, NULL) != SQLITE_OK) {
-    sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
-    return NO;
-  }
-  return YES;
+  return NO;
 }
 
 @end
