@@ -35,13 +35,13 @@ public class UpdatesDatabaseMigrationTest {
 
     // db has schema version 4. insert some data using SQL queries.
     // cannot use DAO classes because they expect the latest schema.
-    db.execSQL("INSERT INTO \"updates\" (\"id\",\"scope_key\",\"commit_time\",\"runtime_version\",\"launch_asset_id\",\"metadata\",\"status\",\"keep\") VALUES" +
-      " (X'8C263F9DE3FF48888496E3244C788661','http://192.168.4.44:3000',1614137308871,'40.0.0',3,'{\"updateMetadata\":{\"updateGroup\":\"34993d39-57e6-46cf-8fa2-eba836f40828\",\"updateGroupCreatedAt\":\"2021-02-23T12:53:46.851Z\",\"branchName\":\"rollout\"}}',1,1),\n" +
-      " (X'594100ea066e4804b5c7c907c773f980','http://192.168.4.44:3000',1614137401950,'40.0.0',4,NULL,1,1)");
     db.execSQL("INSERT INTO \"assets\" (\"id\",\"url\",\"key\",\"headers\",\"type\",\"metadata\",\"download_time\",\"relative_path\",\"hash\",\"hash_type\",\"marked_for_deletion\") VALUES" +
       " (2,'https://url.to/b56cf690e0afa93bd4dc7756d01edd3e','b56cf690e0afa93bd4dc7756d01edd3e.png',NULL,'image/png',NULL,1614137309295,'b56cf690e0afa93bd4dc7756d01edd3e.png',NULL,0,0),\n" +
       " (3,'https://url.to/bundle-1614137308871','bundle-1614137308871',NULL,'application/javascript',NULL,1614137309513,'bundle-1614137308871',NULL,0,0),\n" +
       " (4,NULL,'bundle-1614137401950',NULL,'js',NULL,1614137406588,'bundle-1614137401950',NULL,0,0)");
+    db.execSQL("INSERT INTO \"updates\" (\"id\",\"scope_key\",\"commit_time\",\"runtime_version\",\"launch_asset_id\",\"metadata\",\"status\",\"keep\") VALUES" +
+      " (X'8C263F9DE3FF48888496E3244C788661','http://192.168.4.44:3000',1614137308871,'40.0.0',3,'{\"updateMetadata\":{\"updateGroup\":\"34993d39-57e6-46cf-8fa2-eba836f40828\",\"updateGroupCreatedAt\":\"2021-02-23T12:53:46.851Z\",\"branchName\":\"rollout\"}}',1,1),\n" +
+      " (X'594100ea066e4804b5c7c907c773f980','http://192.168.4.44:3000',1614137401950,'40.0.0',4,NULL,1,1)");
     db.execSQL("INSERT INTO \"updates_assets\" (\"update_id\",\"asset_id\") VALUES" +
       " (X'8C263F9DE3FF48888496E3244C788661',2),\n" +
       " (X'8C263F9DE3FF48888496E3244C788661',3),\n" +

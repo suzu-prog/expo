@@ -60,18 +60,22 @@ CREATE INDEX \"index_json_data_scope_key\" ON \"json_data\" (\"scope_key\")\
                                                 error:(NSError ** _Nullable)error
 {
   return [[self class] initializeDatabaseWithSchema:EXUpdatesDatabaseInitializationLatestSchema
+                                           filename:EXUpdatesDatabaseLatestFilename
                                         inDirectory:directory
+                                      shouldMigrate:YES
                                            database:database
                                               error:error];
 }
 
 + (BOOL)initializeDatabaseWithSchema:(NSString *)schema
+                            filename:(NSString *)filename
                          inDirectory:(NSURL *)directory
+                       shouldMigrate:(BOOL)shouldMigrate
                             database:(struct sqlite3 **)database
                                error:(NSError ** _Nullable)error
 {
   sqlite3 *db;
-  NSURL *dbUrl = [directory URLByAppendingPathComponent:EXUpdatesDatabaseLatestFilename];
+  NSURL *dbUrl = [directory URLByAppendingPathComponent:filename];
   BOOL shouldInitializeDatabaseSchema = ![[NSFileManager defaultManager] fileExistsAtPath:[dbUrl path]];
 
   BOOL didMigrate = [[self class] _migrateDatabaseInDirectory:directory];
@@ -98,7 +102,7 @@ CREATE INDEX \"index_json_data_scope_key\" ON \"json_data\" (\"scope_key\")\
     sqlite3_close(db);
 
     if (resultCode == SQLITE_CORRUPT || resultCode == SQLITE_NOTADB) {
-      NSString *archivedDbFilename = [NSString stringWithFormat:@"%f-%@", [[NSDate date] timeIntervalSince1970], EXUpdatesDatabaseLatestFilename];
+      NSString *archivedDbFilename = [NSString stringWithFormat:@"%f-%@", [[NSDate date] timeIntervalSince1970], filename];
       NSURL *destinationUrl = [directory URLByAppendingPathComponent:archivedDbFilename];
       NSError *err;
       if ([[NSFileManager defaultManager] moveItemAtURL:dbUrl toURL:destinationUrl error:&err]) {
@@ -187,29 +191,35 @@ CREATE INDEX \"index_json_data_scope_key\" ON \"json_data\" (\"scope_key\")\
   if (sqlite3_exec(db, "PRAGMA foreign_keys=OFF;", NULL, NULL, NULL) != SQLITE_OK) return NO;
   if (sqlite3_exec(db, "BEGIN;", NULL, NULL, NULL) != SQLITE_OK) return NO;
 
-  NSString * const migrationSQL = @"CREATE TABLE \"assets\" (\
-  \"id\"  INTEGER PRIMARY KEY AUTOINCREMENT,\
-  \"url\"  TEXT,\
-  \"key\"  TEXT UNIQUE,\
-  \"headers\"  TEXT,\
-  \"type\"  TEXT NOT NULL,\
-  \"metadata\"  TEXT,\
-  \"download_time\"  INTEGER NOT NULL,\
-  \"relative_path\"  TEXT NOT NULL,\
-  \"hash\"  BLOB NOT NULL,\
-  \"hash_type\"  INTEGER NOT NULL,\
-  \"marked_for_deletion\"  INTEGER NOT NULL\
-  );\
-  INSERT INTO `new_assets` (`id`, `url`, `key`, `headers`, `type`, `metadata`, `download_time`, `relative_path`, `hash`, `hash_type`, `marked_for_deletion`)\
-  SELECT `id`, `url`, `key`, `headers`, `type`, `metadata`, `download_time`, `relative_path`, `hash`, `hash_type`, `marked_for_deletion` FROM `assets`;\
-  DROP TABLE `assets`;\
-  ALTER TABLE `new_assets` RENAME TO `assets`;";
-  if (sqlite3_exec(db, migrationSQL.UTF8String, NULL, NULL, NULL) != SQLITE_OK) {
+  if (![[self class] _safeExecOrRollback:db sql:@"CREATE TABLE \"new_assets\" (\
+        \"id\"  INTEGER PRIMARY KEY AUTOINCREMENT,\
+        \"url\"  TEXT,\
+        \"key\"  TEXT UNIQUE,\
+        \"headers\"  TEXT,\
+        \"type\"  TEXT NOT NULL,\
+        \"metadata\"  TEXT,\
+        \"download_time\"  INTEGER NOT NULL,\
+        \"relative_path\"  TEXT NOT NULL,\
+        \"hash\"  BLOB NOT NULL,\
+        \"hash_type\"  INTEGER NOT NULL,\
+        \"marked_for_deletion\"  INTEGER NOT NULL\
+        )"]) return NO;
+  if (![[self class] _safeExecOrRollback:db sql:@"INSERT INTO `new_assets` (`id`, `url`, `key`, `headers`, `type`, `metadata`, `download_time`, `relative_path`, `hash`, `hash_type`, `marked_for_deletion`)\
+        SELECT `id`, `url`, `key`, `headers`, `type`, `metadata`, `download_time`, `relative_path`, `hash`, `hash_type`, `marked_for_deletion` FROM `assets`"]) return NO;
+  if (![[self class] _safeExecOrRollback:db sql:@"DROP TABLE `assets`"]) return NO;
+  if (![[self class] _safeExecOrRollback:db sql:@"ALTER TABLE `new_assets` RENAME TO `assets`"]) return NO;
+
+  if (sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL) != SQLITE_OK) return NO;
+  if (sqlite3_exec(db, "PRAGMA foreign_keys=ON;", NULL, NULL, NULL) != SQLITE_OK) return NO;
+  return YES;
+}
+
++ (BOOL)_safeExecOrRollback:(struct sqlite3 *)db sql:(NSString *)sql
+{
+  if (sqlite3_exec(db, sql.UTF8String, NULL, NULL, NULL) != SQLITE_OK) {
     sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
     return NO;
   }
-
-  if (sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL) != SQLITE_OK) return NO;
   return YES;
 }
 

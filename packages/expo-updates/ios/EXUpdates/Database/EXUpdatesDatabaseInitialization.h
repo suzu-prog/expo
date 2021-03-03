@@ -14,7 +14,9 @@ NS_ASSUME_NONNULL_BEGIN
  * for testing purposes
  */
 + (BOOL)initializeDatabaseWithSchema:(NSString *)schema
+                            filename:(NSString *)filename
                          inDirectory:(NSURL *)directory
+                       shouldMigrate:(BOOL)shouldMigrate
                             database:(struct sqlite3 **)database
                                error:(NSError ** _Nullable)error;
 
